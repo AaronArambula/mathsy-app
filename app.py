@@ -17,15 +17,15 @@ QUESTIONS = pd.DataFrame([
 EXPLANATIONS = {
     "algebra_linear": {
         "intuitive": "Linear equations are balance scales. 2x+3=11 → remove 3 from both sides, then divide by 2.",
-        "formal": "2x+3=11 ⇒ 2x=8 ⇒ x=4. Linear y=mx+b has constant slope m."
+        "formal": "2x+3=11 ⇒ 2x=8 ⇒ x=4. A linear function y=mx+b has constant slope m."
     },
     "rates": {
-        "intuitive": "Average rate = rise/run. For x^2 from 2→5: (25−4)/(5−2)=21/3=7.",
-        "formal": "Average rate on [a,b] is (f(b)−f(a))/(b−a). For x^2, (25−4)/3=7."
+        "intuitive": "Average rate = rise/run between two points. For x^2 from 2→5: (25−4)/(5−2)=21/3=7.",
+        "formal": "Average rate on [a,b] is (f(b)−f(a))/(b−a). For f(x)=x^2, (25−4)/3=7."
     },
     "derivative": {
         "intuitive": "Derivative = instantaneous slope. Zoom in until the curve looks straight; that slope is the derivative.",
-        "formal": "f'(x)=lim_{h→0}(f(x+h)−f(x))/h. For x^2, f'(x)=2x."
+        "formal": "f'(x)=lim_{h→0}(f(x+h)−f(x))/h. For f(x)=x^2, f'(x)=2x."
     }
 }
 
@@ -40,22 +40,40 @@ def time_left_today():
         st.session_state.quota = {today: FREE_SECONDS_PER_DAY}
     return st.session_state.quota[today]
 
-def spend_time(sec):
+def spend_time(sec: int):
     today = str(date.today())
-    st.session_state.quota[today] = max(0, st.session_state.quota[today] - sec)
+    st.session_state.quota[today] = max(0, st.session_state.quota[today] - int(sec))
 
 # ---------------------------
-# Simple learner model
+# Learner history with FIXED DTYPES
 # ---------------------------
 if "history" not in st.session_state:
-    st.session_state.history = pd.DataFrame(columns=["qid", "tag", "correct"])
+    st.session_state.history = pd.DataFrame({
+        "qid": pd.Series(dtype="int64"),
+        "tag": pd.Series(dtype="string"),
+        "correct": pd.Series(dtype="float64"),  # 1.0/0.0
+    })
+
+def append_result(qid: int, tag: str, correct: bool):
+    row = pd.DataFrame([{
+        "qid": int(qid),
+        "tag": str(tag),
+        "correct": float(1 if correct else 0),
+    }])
+    st.session_state.history = pd.concat([st.session_state.history, row], ignore_index=True)
 
 def weakest_tag():
     hist = st.session_state.history
     if hist.empty:
         return np.random.choice(QUESTIONS["tag"].unique())
-    stats = hist.groupby("tag")["correct"].mean().sort_values()
-    return stats.index[0]
+    # ensure numeric
+    means = (pd.to_numeric(hist["correct"], errors="coerce")
+                .groupby(hist["tag"])
+                .mean())
+    means = means.dropna().sort_values()
+    if means.empty:
+        return np.random.choice(QUESTIONS["tag"].unique())
+    return means.index[0]
 
 def choose_next_q():
     weak = weakest_tag()
@@ -69,7 +87,7 @@ def choose_next_q():
     return QUESTIONS.sample(1).iloc[0]
 
 # ---------------------------
-# App state machine
+# UI / State machine
 # ---------------------------
 st.set_page_config(page_title="15-Minute Math (MVP)", page_icon="🧠", layout="centered")
 st.title("🧠 15-Minute Math — MVP")
@@ -89,10 +107,9 @@ if premium:
 else:
     st.info(f"Free time remaining: **{remaining//60}m {remaining%60}s**")
 
-# Initialize per-question state
+# State: phase + current_q + last_feedback
 if "phase" not in st.session_state:
-    # phases: "ask" → "feedback"
-    st.session_state.phase = "ask"
+    st.session_state.phase = "ask"  # "ask" or "feedback"
 if "current_q" not in st.session_state:
     st.session_state.current_q = choose_next_q().to_dict()
 if "last_feedback" not in st.session_state:
@@ -113,18 +130,13 @@ if st.session_state.phase == "ask":
                 st.warning("Pick an option first.")
             else:
                 correct = (answer == q["answer"])
-                # Update history
-                st.session_state.history = pd.concat([
-                    st.session_state.history,
-                    pd.DataFrame([{"qid": qid, "tag": q["tag"], "correct": int(correct)}])
-                ], ignore_index=True)
+                append_result(qid, q["tag"], correct)
 
-                # Store feedback to show after rerun
                 st.session_state.last_feedback = {"correct": correct, "chosen": answer}
                 st.session_state.phase = "feedback"
 
                 if not premium:
-                    spend_time(8)  # spend time on grading/explaining
+                    spend_time(8)  # spend on grading/explaining
 
                 st.rerun()
 
@@ -136,7 +148,6 @@ if st.session_state.phase == "feedback":
     else:
         st.error(f"❌ Not quite. Correct answer: **{q['answer']}**")
 
-    # Explanation
     pack = EXPLANATIONS[q["tag"]]
     st.markdown("### Explanation")
     st.write(pack["intuitive" if style == "Intuitive" else "formal"])
@@ -154,28 +165,38 @@ if st.session_state.phase == "feedback":
         df = pd.DataFrame({"x": xs, "f(x)=x^2": ys}).set_index("x")
         st.line_chart(df)
 
+        # burn once per question when showing interactive
         if not premium:
-            # Spend time once on interaction view; avoid per-slider tick burns
             if "spent_interactive" not in st.session_state or st.session_state.spent_interactive != qid:
                 spend_time(4)
                 st.session_state.spent_interactive = qid
 
     st.markdown("---")
     if st.button("Next question →"):
-        # Advance to a brand new question and reset phase
         st.session_state.current_q = choose_next_q().to_dict()
         st.session_state.phase = "ask"
         st.session_state.last_feedback = None
-        # Reset prior selection key so radio starts empty for the new q
-        st.session_state.pop(f"choice_{qid}", None)
+        st.session_state.pop(f"choice_{qid}", None)  # reset radio for new q
         if not premium:
             spend_time(2)
         st.rerun()
 
-# Progress
+# ----- Progress / Weak area -----
 if not st.session_state.history.empty:
     st.markdown("### Your current weak area")
-    weak = weakest_tag()
-    stats = st.session_state.history.groupby("tag")["correct"].mean().round(2)
-    st.write(f"**{weak}** is your lowest-accuracy tag so far.")
-    st.dataframe(stats.reset_index().rename(columns={"correct": "accuracy"}), use_container_width=True)
+    hist = st.session_state.history.copy()
+    hist["correct"] = pd.to_numeric(hist["correct"], errors="coerce")
+
+    tag_means = (hist.groupby("tag", dropna=True)["correct"]
+                    .mean()
+                    .sort_values())
+
+    if not tag_means.empty:
+        weak = tag_means.index[0]
+        st.write(f"**{weak}** is your lowest-accuracy tag so far.")
+        stats_df = (tag_means.round(2)
+                    .rename("accuracy")
+                    .reset_index())
+        st.dataframe(stats_df, use_container_width=True)
+    else:
+        st.info("Answer a question to see your weak areas.")
